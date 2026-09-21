@@ -82,13 +82,17 @@ stages {
                         "${APP_SERVER_USER}@${APP_SERVER_HOST}:${remote_jar}"
 
                     ssh ${ssh_options} \
-                        "${APP_SERVER_USER}@${APP_SERVER_HOST}" \
-                        "sudo install -o ubuntu -g ubuntu -m 0644 '${remote_jar}' '${APP_DIRECTORY}/student-management.jar' && \
+                         "${APP_SERVER_USER}@${APP_SERVER_HOST}" \
+                         "sudo install -o ubuntu -g ubuntu -m 0644 '${remote_jar}' '${APP_DIRECTORY}/student-management.jar' && \
                          rm -f '${remote_jar}' && \
                          sudo systemctl restart student-management && \
-                         sudo systemctl is-active --quiet student-management"
+                        echo 'Waiting for application to start...' && \
+                         sleep 15 && \
+                        sudo systemctl is-active --quiet student-management && \
+                         echo 'Checking application health...' && \
+                         curl -fsS http://localhost:8080/login > /dev/null"
 
-                    echo "Deployment successful."
+                    echo "Deployment and health check successful."
                 '''
             }
         }
