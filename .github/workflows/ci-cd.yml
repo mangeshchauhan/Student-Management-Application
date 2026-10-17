@@ -10,8 +10,6 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17', cache: maven }
       - run: mvn -B clean package
-      - uses: actions/upload-artifact@v4
-        with: { name: jar, path: target/student-management.jar }
 
   docker:
     needs: build
@@ -28,60 +26,4 @@ jobs:
           context: .
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/student-management:latest
-
-  deploy:
-    needs: docker
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - uses: actions/checkout@v4
-
-      # Create directory on EC2
-      - name: Create deployment directory
-        uses: appleboy/ssh-action@v1.0.3
-
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-
-          script: |
-               cd /opt/student-management
-
-               docker compose pull
-
-               docker compose up -d          
-   
-               sudo mkdir -p /opt/student-management
-
-      # Copy compose file to EC2
-      - name: Copy docker-compose.yml
-        uses: appleboy/scp-action@v0.1.7
-
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-
-          source: "docker-compose.yml"
-          target: "/opt/student-management"
-
-      # Deploy containers
-      - name: Deploy application
-        uses: appleboy/ssh-action@v1.0.3
-
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-
-          script: |
-            cd /opt/student-management
-
-            sudo docker compose pull
-
-            sudo docker compose up -d
-# Adding new line
 
