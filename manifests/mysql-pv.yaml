@@ -10,10 +10,10 @@ spec:
   accessModes:
   - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
-  storageClassName: ""
+  storageClassName: "gp2"
   csi:
     driver: ebs.csi.aws.com
-    volumeHandle: vol-01d678fd99330d71d
+    volumeHandle: vol-0f8880bacacb8a7ec
     fsType: ext4
   nodeAffinity:
     required:

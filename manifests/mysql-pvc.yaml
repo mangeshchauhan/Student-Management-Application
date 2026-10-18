@@ -5,7 +5,7 @@ metadata:
   name: mysql-data
   namespace: student-management
 spec:
-  storageClassName: ""
+  storageClassName: "gp2"
   accessModes:
   - ReadWriteOnce
   volumeName: mysql-ebs-pv
