@@ -120,7 +120,66 @@ The Jenkins-to-Application Server deployment uses SSH/SCP, while GitHub source c
 
 # 🔄 CI/CD Pipeline
 
-The project implements a Jenkins-based CI/CD pipeline.
+GitHub Actions builds the Spring Boot application and pushes the container image to Docker Hub. Argo CD synchronizes the Kubernetes resources from the `manifests/` directory; it does not build or publish the image.
+
+## Argo CD Setup
+
+These steps assume an EKS cluster is available and the AWS Load Balancer Controller and EBS CSI driver are installed. The Application in `argocd/application.yaml` uses the repository's HTTPS URL without credentials, so the repository must be publicly readable by Argo CD. For a private repository, register repository credentials with Argo CD before applying the Application.
+
+### Install Argo CD
+
+```powershell
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+```
+
+### Create the database Secret
+
+The `manifests/secret.yaml` file is excluded from Argo CD because it contains placeholders. Create the real Secret directly in the cluster before syncing the application. In PowerShell, enter the actual MySQL credentials when prompted:
+
+```powershell
+kubectl create namespace student-management --dry-run=client -o yaml | kubectl apply -f -
+$root = Read-Host "MySQL root password" -AsSecureString
+$db = Read-Host "MySQL application password" -AsSecureString
+$rootPlain = [System.Net.NetworkCredential]::new('', $root).Password
+$dbPlain = [System.Net.NetworkCredential]::new('', $db).Password
+kubectl create secret generic student-management-db-secret -n student-management --from-literal="MYSQL_ROOT_PASSWORD=$rootPlain" --from-literal="DB_PASSWORD=$dbPlain" --dry-run=client -o yaml | kubectl apply -f -
+Remove-Variable root,db,rootPlain,dbPlain
+```
+
+Use the same database password that the existing `sms_app` MySQL account has. If the Secret already exists, update it deliberately rather than running the create command again. Updating a Secret does not change passwords stored inside an initialized MySQL database.
+
+### Register and Sync the Application
+
+```powershell
+kubectl apply -f argocd/application.yaml
+kubectl get applications.argoproj.io -n argocd
+kubectl get pods -n student-management
+```
+
+The Application automatically syncs manifest changes and self-heals drift. Automatic pruning is disabled to avoid deleting stateful MySQL resources when manifests are removed. The MySQL Secret is not managed by Argo CD.
+
+### Open the Argo CD UI
+
+In a separate PowerShell window, forward the Argo CD server port:
+
+```powershell
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+```
+
+Open `https://localhost:8080`, accept the local certificate warning, and sign in as `admin`. Retrieve the initial password with:
+
+```powershell
+$encoded = kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}"
+[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encoded))
+```
+
+Change the initial admin password after signing in. The UI port-forward only lasts while the command is running.
+
+### Image Updates
+
+GitHub Actions currently pushes the `latest` image tag. Argo CD tracks Kubernetes manifests and does not detect a new image pushed under an unchanged tag. To roll out each build reliably, use immutable image tags and update `manifests/deployment.yaml`, or install and configure Argo CD Image Updater. Avoid relying on `latest` alone to trigger pod replacements.
 
 ### Pipeline Flow
 
