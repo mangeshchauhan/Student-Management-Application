@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+name: student-management-daemonset
+namespace: student-management
+spec:
+  selector:
+    matchLabels:
+      app: student-management
+  template:
+    metadata:
+      labels:
+        app: student-management
+    spec:
+      containers:
+      - name: student-management
+        image: your-dockerhub-username/student-management:latest
+        ports:
+        - containerPort: 8080

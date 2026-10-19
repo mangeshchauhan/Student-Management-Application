@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: student-management-backup-config
+  namespace: student-management
+data:
+  S3_BUCKET: REPLACE_WITH_PRIVATE_S3_BUCKET_NAME
+  S3_PREFIX: student-management/mysql
+  AWS_REGION: us-east-1

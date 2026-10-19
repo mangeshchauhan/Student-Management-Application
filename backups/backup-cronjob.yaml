@@ -1,0 +1,94 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: student-management-mysql-backup
+  namespace: student-management
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 604800
+      template:
+        spec:
+          serviceAccountName: student-management-backup
+          restartPolicy: Never
+          initContainers:
+          - name: mysqldump
+            image: mysql:8.0
+            imagePullPolicy: IfNotPresent
+            command:
+            - sh
+            - -c
+            - |
+              set -eu
+              export MYSQL_PWD="$DB_PASSWORD"
+              mysqldump \
+                --host="$DB_HOST" \
+                --port="$DB_PORT" \
+                --user="$DB_USER" \
+                --single-transaction \
+                --no-tablespaces \
+                --routines \
+                --triggers \
+                --events \
+                --databases "$DB_NAME" \
+                > "/backup/${DB_NAME}-$(date -u +%Y%m%dT%H%M%SZ).sql"
+            envFrom:
+            - configMapRef:
+                name: student-management-config
+            env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: student-management-db-secret
+                  key: DB_PASSWORD
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+            volumeMounts:
+            - name: backup-data
+              mountPath: /backup
+          containers:
+          - name: upload-to-s3
+            image: public.ecr.aws/aws-cli/aws-cli:2.27.41
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              file=$(find /backup -maxdepth 1 -type f -name '*.sql' -print -quit)
+              test -n "$file"
+              aws s3 cp "$file" \
+                "s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "$file")" \
+                --region "$AWS_REGION" \
+                --sse AES256 \
+                --only-show-errors
+              echo "Database backup uploaded to S3."
+            envFrom:
+            - configMapRef:
+                name: student-management-backup-config
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+            volumeMounts:
+            - name: backup-data
+              mountPath: /backup
+          volumes:
+          - name: backup-data
+            emptyDir:
+              sizeLimit: 5Gi

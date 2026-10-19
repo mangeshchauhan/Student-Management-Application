@@ -122,6 +122,8 @@ The Jenkins-to-Application Server deployment uses SSH/SCP, while GitHub source c
 
 GitHub Actions builds the Spring Boot application and pushes the container image to Docker Hub. Argo CD synchronizes the Kubernetes resources from the `manifests/` directory; it does not build or publish the image.
 
+The GitHub Actions pipeline also runs SonarQube code analysis and a Trivy container-image scan before pushing. See the [SonarQube and Trivy setup guide](docs/security-scanning/README.md) for server setup, GitHub variables/secrets, and local scan commands.
+
 ## Argo CD Setup
 
 These steps assume an EKS cluster is available and the AWS Load Balancer Controller and EBS CSI driver are installed. The Application in `argocd/application.yaml` uses the repository's HTTPS URL without credentials, so the repository must be publicly readable by Argo CD. For a private repository, register repository credentials with Argo CD before applying the Application.
@@ -180,6 +182,34 @@ Change the initial admin password after signing in. The UI port-forward only las
 ### Image Updates
 
 GitHub Actions currently pushes the `latest` image tag. Argo CD tracks Kubernetes manifests and does not detect a new image pushed under an unchanged tag. To roll out each build reliably, use immutable image tags and update `manifests/deployment.yaml`, or install and configure Argo CD Image Updater. Avoid relying on `latest` alone to trigger pod replacements.
+
+### Scheduled MySQL Backups to S3
+
+The backup resources are in `backups/`, outside the Argo CD application's `manifests/` path. They use a CronJob with a MySQL `mysqldump` init container, then upload the completed dump to a private S3 bucket using the EKS IAM role for service accounts (IRSA). A DaemonSet is not used: it would run on every node and could create duplicate database backups.
+
+Before applying, configure IRSA for the cluster's OIDC provider. Create an IAM role whose trust policy allows `sts:AssumeRoleWithWebIdentity` only for the service account subject `system:serviceaccount:student-management:student-management-backup` and audience `sts.amazonaws.com`. Attach a policy scoped to the backup prefix, allowing `s3:PutObject` and `s3:AbortMultipartUpload` on `arn:aws:s3:::YOUR_BUCKET/student-management/mysql/*`. Keep S3 Block Public Access enabled. Replace the bucket name and IAM role ARN placeholders in `backups/backup-config.yaml` and `backups/backup-serviceaccount.yaml`; adjust `AWS_REGION` if necessary.
+
+Apply the backup resources after the database Secret and MySQL service are available:
+
+```powershell
+kubectl apply -f backups/backup-config.yaml
+kubectl apply -f backups/backup-serviceaccount.yaml
+kubectl apply -f backups/backup-cronjob.yaml
+```
+
+The schedule is daily at 02:00 UTC. The dump uses the existing `student-management-config` and `student-management-db-secret`; the database user must have permission to dump the application schema, routines, triggers, and events. The Pod writes a temporary uncompressed SQL dump to an `emptyDir` limited to 5 GiB, then uploads it with S3 server-side encryption (`AES256`). Increase that limit if your database dump may exceed 5 GiB.
+
+Trigger a test backup immediately and inspect its result:
+
+```powershell
+$job = "student-management-backup-manual-$(Get-Date -Format yyyyMMddHHmmss)"
+kubectl create job --from=cronjob/student-management-mysql-backup $job -n student-management
+kubectl wait --for=condition=complete "job/$job" -n student-management --timeout=30m
+kubectl logs "job/$job" -n student-management
+aws s3 ls s3://YOUR_BUCKET/student-management/mysql/
+```
+
+The CronJob is not itself a restore strategy. Keep an S3 lifecycle/retention policy and periodically test restoring a dump into a separate database before relying on these backups.
 
 ### Pipeline Flow
 
