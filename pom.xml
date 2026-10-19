@@ -13,6 +13,7 @@
     <name>student-management</name>
     <properties>
         <java.version>17</java.version>
+        <jackson-bom.version>2.18.8</jackson-bom.version>
     </properties>
     <dependencies>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
