@@ -11,7 +11,6 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
-import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 
 @Configuration @RequiredArgsConstructor
 public class SecurityConfig {
@@ -40,7 +39,10 @@ public class SecurityConfig {
           .logout(l -> l.logoutSuccessUrl("/login?logout").permitAll())
           .csrf(c -> c
             .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
-            .ignoringRequestMatchers(new AntPathRequestMatcher("/api/**")))
+                        .ignoringRequestMatchers(request -> {
+                                String path = request.getServletPath();
+                                return path.equals("/api") || path.startsWith("/api/");
+                        }))
           .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED));
         return http.build();
     }
