@@ -38,11 +38,7 @@ public class SecurityConfig {
           .formLogin(f -> f.loginPage("/login").defaultSuccessUrl("/dashboard", true).permitAll())
           .logout(l -> l.logoutSuccessUrl("/login?logout").permitAll())
           .csrf(c -> c
-            .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
-                        .ignoringRequestMatchers(request -> {
-                                String path = request.getServletPath();
-                                return path.equals("/api") || path.startsWith("/api/");
-                        }))
+                        .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()))
           .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED));
         return http.build();
     }
