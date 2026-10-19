@@ -20,16 +20,14 @@
 
     <properties>
         <java.version>17</java.version>
-        <jackson-bom.version>2.21.8</jackson-bom.version>
-        <tomcat.version>10.1.59</tomcat.version>
     </properties>
 
     <dependencies>
 
-        <!-- Spring Web and REST APIs -->
+        <!-- Spring MVC and REST APIs -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
 
         <!-- Database and JPA -->
