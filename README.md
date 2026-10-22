@@ -16,11 +16,12 @@
 
 ## 📌 Project Overview
 
-The Student Management System provides a web-based interface for managing student records.
+The Student Management System provides a web-based interface for managing student records. This repository contains both a legacy EC2/Jenkins deployment path and a containerized EKS deployment path. Choose the deployment guide for your target:
 
-The application is deployed on an **AWS EC2 Application Server**, while student data is stored in **Amazon RDS for MySQL**.
+- [EC2 deployment (Jenkins, Spring Boot, and RDS)](docs/deployment/ec2/README.md)
+- [EKS deployment (Docker, Argo CD, and Image Updater)](docs/deployment/eks/README.md)
 
-Jenkins is hosted on a separate EC2 instance and automatically:
+The legacy deployment runs the application on an **AWS EC2 Application Server** and stores student data in **Amazon RDS for MySQL**. Its Jenkins pipeline is hosted on a separate EC2 instance and automatically:
 
 1. Checks out the source code from GitHub
 2. Builds and tests the application using Maven
@@ -33,7 +34,7 @@ Jenkins is hosted on a separate EC2 instance and automatically:
 
 ---
 
-# 🏗️ AWS Architecture
+# 🏗️ Legacy EC2/Jenkins Architecture
 
 ### Architecture Diagram
 
@@ -122,11 +123,124 @@ The Jenkins-to-Application Server deployment uses SSH/SCP, while GitHub source c
 
 GitHub Actions builds the Spring Boot application and pushes the container image to Docker Hub. Argo CD synchronizes the Kubernetes resources from the `manifests/` directory; it does not build or publish the image.
 
-The GitHub Actions pipeline also runs SonarQube code analysis and a Trivy container-image scan before pushing. See the [SonarQube and Trivy setup guide](docs/security-scanning/README.md) for server setup, GitHub variables/secrets, and local scan commands.
+The GitHub Actions pipeline also runs SonarQube code analysis and a Trivy container-image scan before pushing, then exports scan reports to S3. See the [SonarQube and Trivy setup guide](docs/security-scanning/README.md) for server setup, GitHub variables/secrets, and local scan commands. For ordered deployment steps, use the separate [EC2 guide](docs/deployment/ec2/README.md) or [EKS guide](docs/deployment/eks/README.md).
+
+## EKS Deployment Runbook
+
+Follow these steps in order after the EKS cluster and worker nodes are created. Commands below use PowerShell unless otherwise noted. Replace every `YOUR_...` value with your own configuration; never commit passwords, access tokens, or private keys.
+
+### 1. Connect to the intended EKS cluster
+
+Configure AWS CLI credentials for an IAM identity authorized to access the cluster, then update the local kubeconfig:
+
+```powershell
+aws eks update-kubeconfig --region YOUR_AWS_REGION --name YOUR_CLUSTER_NAME
+kubectl config current-context
+kubectl get nodes -o wide
+```
+
+Continue only after `kubectl get nodes` shows the expected Ready nodes in the intended cluster.
+
+### 2. Install and verify the EKS cluster add-ons
+
+Before deploying this application's manifests, install and configure:
+
+- **Amazon EBS CSI driver**, with its required IAM role, for the MySQL persistent volume.
+- **AWS Load Balancer Controller**, with its required IAM permissions, for the ALB Ingress.
+
+Use the AWS EKS documentation for [the EBS CSI driver](https://docs.aws.amazon.com/eks/latest/userguide/ebs-csi.html) and [AWS Load Balancer Controller](https://docs.aws.amazon.com/eks/latest/userguide/aws-load-balancer-controller.html). Verify the controllers and available storage classes:
+
+```powershell
+kubectl get pods -n kube-system
+kubectl get storageclass
+```
+
+Do not proceed if the EBS CSI controller or AWS Load Balancer Controller is not healthy.
+
+### 3. Prepare and verify MySQL persistent storage
+
+This repository currently uses a **static EBS PersistentVolume**. Before syncing the application, open [mysql-pv.yaml](manifests/mysql-pv.yaml) and verify `volumeHandle` is the ID of the EBS volume you intend to use and the node-affinity availability zone matches that volume's zone. The volume must be in the same AWS region as the cluster and must not be mounted by another database. Do not point a new database at a volume containing data you do not intend to retain.
+
+The PersistentVolume and claim currently use the `gp2` storage class, while [storageclass.yaml](manifests/storageclass.yaml) defines a separate `ebs-gp3-retain` class. The static PV and PVC must use the same storage class name; make sure the EKS cluster has a matching class or update both manifests consistently before deployment. The `ebs-gp3-retain` resource alone does not change the claim's storage class.
+
+After applying the application in step 7, verify the claim binds before expecting MySQL to start:
+
+```powershell
+kubectl get pv
+kubectl get pvc -n student-management
+kubectl describe pvc mysql-data -n student-management
+```
+
+### 4. Prepare S3 and the two separate AWS roles
+
+Create a private S3 bucket with Block Public Access enabled. Configure **two separate least-privilege IAM roles**:
+
+1. **EKS backup role:** IRSA trust for `system:serviceaccount:student-management:student-management-backup`, with `s3:PutObject` and `s3:AbortMultipartUpload` scoped to `YOUR_BUCKET/student-management/mysql/*`. Update the bucket, region, and role ARN placeholders in [backup-config.yaml](backups/backup-config.yaml) and [backup-serviceaccount.yaml](backups/backup-serviceaccount.yaml).
+2. **GitHub Actions report role:** GitHub OIDC trust restricted to this repository's `main` branch, with `s3:PutObject` scoped to `YOUR_BUCKET/security-reports/mangeshchauhan/Student-Management-Application/*`. Set this role ARN, bucket, and region in the GitHub repository variables in step 8.
+
+Do not reuse the EKS role as the GitHub Actions role. The reports and database backups use separate S3 prefixes and identities. The detailed GitHub OIDC trust and policy requirements are in the [security-scanning guide](docs/security-scanning/README.md).
+
+### 5. Install Argo CD
+
+Install Argo CD into its own namespace and wait for the server:
+
+```powershell
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+```
+
+The Argo CD UI and initial admin-password instructions are in [Open the Argo CD UI](#open-the-argo-cd-ui) below. Change the initial password after the first login.
+
+### 6. Create the application namespace and database Secret
+
+Create the namespace and Secret before syncing resources. The steps in [Create the database Secret](#create-the-database-secret) prompt for the MySQL root and application passwords. Use the same application password as the `sms_app` user in the database. If MySQL has already initialized its data volume, changing the Kubernetes Secret alone does not change the MySQL account password.
+
+The Secret is deliberately not stored in Git or managed by Argo CD. Do not apply the placeholder [secret.yaml](manifests/secret.yaml) as production credentials.
+
+### 7. Register the Argo CD Application and synchronize it
+
+Apply the Application after cluster add-ons, storage, and the Secret are ready:
+
+```powershell
+kubectl apply -f argocd/application.yaml
+kubectl get applications.argoproj.io -n argocd
+kubectl get pods,pvc -n student-management
+```
+
+The Application tracks `main` and automatically syncs the Kustomize resources in `manifests/`. Keep `spec.source.directory` unset; Argo CD must detect `manifests/kustomization.yaml` and render it with Kustomize. Automatic self-healing is enabled and pruning is disabled to reduce the risk of removing stateful resources.
+
+Wait for the MySQL PVC and pod to become healthy before diagnosing application startup. Check `kubectl describe pod` and pod Events if a container remains in `ContainerCreating` or enters a restart back-off.
+
+### 8. Configure GitHub Actions, SonarQube, and S3 report access
+
+Before pushing a source change or manually running the workflow, configure the GitHub repository variables and secrets listed in the [security-scanning guide](docs/security-scanning/README.md). These include the SonarQube URL/project, the GitHub OIDC AWS role/region/report bucket, SonarQube analysis and report tokens, and Docker Hub push credentials.
+
+The SonarQube endpoint must be reachable by GitHub-hosted runners; use HTTPS for real CI runs so analysis tokens are not sent over plaintext HTTP. Confirm that GitHub OIDC trust is restricted to this repository and the intended `main` branch, and that its role can write only to the security-report S3 prefix.
+
+### 9. Install Argo CD Image Updater
+
+After the Argo CD Application exists, follow [Install Argo CD Image Updater](#install-argo-cd-image-updater). The updater needs a GitHub token with repository Contents write access to update the image tag in Git. Apply [image-updater.yaml](argocd/image-updater.yaml) only after the controller is installed and the `git-creds` Secret exists in namespace `argocd`.
+
+### 10. Verify ingress and the end-to-end image update
+
+Check that the Ingress has received an ALB address and the application Deployment is ready:
+
+```powershell
+kubectl get ingress,service -n student-management
+kubectl rollout status deployment/student-management -n student-management --timeout=10m
+kubectl get pods -n student-management -o wide
+```
+
+For an image-updater test, run the GitHub Actions workflow on `main` and wait for build, SonarQube, Trivy, and Docker Hub push to succeed. Image Updater should commit the new build tag to the repository; Argo CD should then sync and roll out that exact tag. The workflow ignores Image Updater's manifest-only commits so they do not trigger another image build. See [Image Updates](#image-updates) for the flow.
+
+### 11. Enable and test scheduled MySQL backups
+
+Only after MySQL is healthy, update the backup bucket/region and IRSA role placeholders, then follow [Scheduled MySQL Backups to S3](#scheduled-mysql-backups-to-s3) to apply the backup resources and run a manual test backup. Confirm the object appears in the private S3 backup prefix and periodically test restoring it.
 
 ## Argo CD Setup
 
-These steps assume an EKS cluster is available and the AWS Load Balancer Controller and EBS CSI driver are installed. The Application in `argocd/application.yaml` uses the repository's HTTPS URL without credentials, so the repository must be publicly readable by Argo CD. For a private repository, register repository credentials with Argo CD before applying the Application.
+The following sections provide the detailed commands for the runbook above. The Application in `argocd/application.yaml` uses the repository's HTTPS URL without credentials, so the repository must be publicly readable by Argo CD. For a private repository, register repository credentials with Argo CD before applying the Application.
 
 ### Install Argo CD
 
@@ -179,6 +293,8 @@ kubectl get pods -n student-management
 ```
 
 The Application automatically syncs manifest changes and self-heals drift. Automatic pruning is disabled to avoid deleting stateful MySQL resources when manifests are removed. The MySQL Secret is not managed by Argo CD.
+
+The Application uses the `manifests/kustomization.yaml` file to render resources with Kustomize. Do not configure `spec.source.directory` for this Application; directory mode makes Argo CD interpret `kustomization.yaml` as a Kubernetes resource instead of a build file.
 
 ### Open the Argo CD UI
 

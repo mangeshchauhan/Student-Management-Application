@@ -21,7 +21,7 @@ Configure the instance security group:
 - Allow HTTP (TCP 80) and HTTPS (TCP 443) only as needed for DNS validation and the HTTPS endpoint.
 - Do not expose SonarQube's TCP 9000 or PostgreSQL's TCP 5432 publicly.
 
-Point a DNS name such as `sonar.example.com` to the EC2 public address (or a load balancer in front of it). The existing workflow uses GitHub-hosted runners, so `SONAR_HOST_URL` must be an HTTPS endpoint reachable from those runners. If policy requires SonarQube to stay private, install a self-hosted GitHub Actions runner inside the VPC and change the workflow's build job from `ubuntu-latest` to that runner's labels; do not open port 9000 to the internet.
+Point a DNS name you own, such as `sonar.your-company.com`, to the EC2 public address (or a load balancer in front of it). `sonar.example.com` used in examples below is a placeholder under a reserved example domain; it cannot be used to obtain a certificate. Replace it everywhere with your real DNS name. The existing workflow uses GitHub-hosted runners, so `SONAR_HOST_URL` must be an HTTPS endpoint reachable from those runners. If policy requires SonarQube to stay private, install a self-hosted GitHub Actions runner inside the VPC and change the workflow's build job from `ubuntu-latest` to that runner's labels; do not open port 9000 to the internet.
 
 ## 2. Install Docker Engine and Prepare Linux
 
@@ -126,7 +126,7 @@ The first startup can take several minutes. The SonarQube port is bound to local
 
 ## 4. Configure Nginx and HTTPS
 
-Install Nginx and Certbot, then create a reverse-proxy site. Replace `sonar.example.com` with the DNS name pointed at the instance:
+Install Nginx and Certbot, then create a reverse-proxy site. Replace every `sonar.example.com` below with the real DNS name you own and have pointed at the instance. Before requesting the certificate, confirm that the DNS record resolves to this server and inbound TCP ports 80 and 443 are reachable from the internet; Certbot's default HTTP validation needs port 80:
 
 ```bash
 sudo apt-get install -y nginx certbot python3-certbot-nginx
@@ -154,7 +154,7 @@ sudo systemctl reload nginx
 sudo certbot --nginx -d sonar.example.com
 ```
 
-Verify `https://sonar.example.com` loads. Keep inbound TCP 9000 closed in the EC2 security group; GitHub Actions should use the HTTPS endpoint.
+The command above still contains the example placeholder: substitute your actual hostname (for example, `sudo certbot --nginx -d sonar.your-company.com`) before running it. Verify `https://<your-real-hostname>` loads. Keep inbound TCP 9000 closed in the EC2 security group; GitHub Actions should use the HTTPS endpoint.
 
 Open the site, sign in with the initial `admin` credentials, and immediately change the password. Back up the PostgreSQL and SonarQube data volumes, and keep Ubuntu, Docker, PostgreSQL, and SonarQube patched.
 
@@ -175,16 +175,38 @@ Add these repository variables:
 | --- | --- |
 | `SONAR_HOST_URL` | SonarQube server URL, including scheme, such as `https://sonar.example.com` |
 | `SONAR_PROJECT_KEY` | The exact project key created in SonarQube |
+| `AWS_ROLE_ARN` | ARN of the AWS IAM role GitHub Actions assumes through OIDC |
+| `AWS_REGION` | AWS region containing the report bucket |
+| `S3_BUCKET` | Name of the private S3 bucket for scan reports |
 
 Add these repository secrets:
 
 | Secret | Value |
 | --- | --- |
 | `SONAR_TOKEN` | SonarQube project analysis token |
+| `SONAR_REPORT_TOKEN` | SonarQube token whose user has Browse permission on the project |
 | `DOCKERHUB_USERNAME` | Docker Hub username |
 | `DOCKERHUB_TOKEN` | Docker Hub access token with permission to push the image |
 
-Never commit tokens or passwords. If Docker Hub secrets already exist for the current workflow, keep them and add only the SonarQube values.
+Never commit tokens or passwords. The report token is separate because exporting issues through SonarQube's Web API requires project Browse permission; grant it only the access needed to read this project.
+
+### Configure GitHub Actions access to S3
+
+Use GitHub's OIDC federation rather than long-lived AWS access keys. Configure the AWS account's GitHub OIDC provider (`token.actions.githubusercontent.com`) and an IAM role trusted only for this repository's `main` branch. Its trust policy should restrict the audience to `sts.amazonaws.com` and the subject to:
+
+```text
+repo:mangeshchauhan/Student-Management-Application:ref:refs/heads/main
+```
+
+Grant that role only `s3:PutObject` on the report prefix:
+
+```text
+arn:aws:s3:::YOUR_PRIVATE_BUCKET/security-reports/mangeshchauhan/Student-Management-Application/*
+```
+
+Replace `YOUR_PRIVATE_BUCKET` with the bucket configured in `S3_BUCKET`. Keep S3 Block Public Access enabled. The workflow uploads reports with SSE-S3 (`AES256`); configure bucket lifecycle rules if reports should expire automatically.
+
+The workflow creates `sonarqube-issues.csv` from the project's current SonarQube issues returned by `/api/issues/search`, and converts Trivy's JSON vulnerability report into `trivy-vulnerabilities.csv`. Both are uploaded under a unique path containing the GitHub run ID, attempt, and commit SHA. Reports are uploaded before the quality-gate check is finalized, so a failing scan can still leave its report in S3. The SonarQube CSV describes current project issues (not only issues introduced by that commit); the commit SHA is included to associate it with the workflow run.
 
 ## 7. Run the Workflow
 
@@ -202,6 +224,7 @@ The image tags are:
 
 ```text
 <DOCKERHUB_USERNAME>/student-management:<commit-sha>
+<DOCKERHUB_USERNAME>/student-management:build-<run-number>-<commit-sha>
 <DOCKERHUB_USERNAME>/student-management:latest
 ```
 
@@ -209,7 +232,7 @@ Deployments should prefer the commit-SHA tag for reproducibility. `latest` is mu
 
 ## 8. Trivy Runs in GitHub Actions
 
-The current workflow uses `aquasecurity/trivy-action` on the GitHub runner. It scans the locally built image before Docker Hub login and push; Trivy does not need to be installed on the SonarQube EC2 instance. The scan checks operating-system and application-library vulnerabilities, blocks HIGH/CRITICAL findings when a fix is available, and ignores unfixed findings. A failed scan prevents both image tags from being pushed.
+The workflow uses `aquasecurity/trivy-action` on the GitHub runner. It scans the locally built image before Docker Hub login and push, writes `trivy-results.json`, converts vulnerabilities to CSV, and uploads the CSV to S3. Trivy does not need to be installed on the SonarQube EC2 instance. The scan checks operating-system and application-library vulnerabilities, blocks HIGH/CRITICAL findings when a fix is available, and ignores unfixed findings. A failed scan still uploads its report but prevents the image tags from being pushed.
 
 ### Install Trivy on EC2 for Manual Scans (Optional)
 

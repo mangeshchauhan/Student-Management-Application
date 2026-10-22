@@ -4,15 +4,20 @@ on:
     branches: [main]
     paths-ignore:
       - manifests/kustomization.yaml
+      - manifests/.argocd-source-student-management.yaml
   workflow_dispatch:
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     env:
       SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
       SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      S3_BUCKET: ${{ vars.S3_BUCKET }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -20,12 +25,21 @@ jobs:
       - name: Validate SonarQube configuration
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_REPORT_TOKEN: ${{ secrets.SONAR_REPORT_TOKEN }}
         run: |
           set -eu
           test -n "$SONAR_HOST_URL" || { echo "SONAR_HOST_URL repository variable is required"; exit 1; }
           test -n "$SONAR_PROJECT_KEY" || { echo "SONAR_PROJECT_KEY repository variable is required"; exit 1; }
           test -n "$SONAR_TOKEN" || { echo "SONAR_TOKEN repository secret is required"; exit 1; }
+          test -n "$SONAR_REPORT_TOKEN" || { echo "SONAR_REPORT_TOKEN repository secret is required"; exit 1; }
+          test -n "$AWS_REGION" || { echo "AWS_REGION repository variable is required"; exit 1; }
+          test -n "$S3_BUCKET" || { echo "S3_BUCKET repository variable is required"; exit 1; }
+          test -n "$AWS_ROLE_ARN" || { echo "AWS_ROLE_ARN repository variable is required"; exit 1; }
+      - name: Clear previous SonarQube task metadata
+        run: rm -f .scannerwork/report-task.txt
       - name: Build, test, and analyze with SonarQube
+        id: sonar-analysis
+        continue-on-error: true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: >-
@@ -35,14 +49,58 @@ jobs:
           -Dsonar.projectKey="$SONAR_PROJECT_KEY"
           -Dsonar.token="$SONAR_TOKEN"
           -Dsonar.qualitygate.wait=true
+      - name: Export SonarQube issues to CSV
+        id: sonar-csv
+        if: always() && steps.sonar-analysis.outcome != 'skipped'
+        env:
+          SONAR_REPORT_TOKEN: ${{ secrets.SONAR_REPORT_TOKEN }}
+        run: |
+          test -f .scannerwork/report-task.txt || {
+            echo "SonarQube did not submit an analysis; refusing to export possibly stale issues"
+            exit 1
+          }
+          python scripts/export_scan_reports.py sonar \
+            --host "$SONAR_HOST_URL" \
+            --project-key "$SONAR_PROJECT_KEY" \
+            --commit "$GITHUB_SHA" \
+            --output sonarqube-issues.csv
+      - name: Configure AWS credentials for report upload
+        id: sonar-aws
+        if: always() && steps.sonar-csv.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Upload SonarQube CSV to S3
+        id: sonar-upload
+        if: always() && steps.sonar-csv.outcome == 'success' && steps.sonar-aws.outcome == 'success'
+        run: |
+          aws s3 cp sonarqube-issues.csv \
+            "s3://$S3_BUCKET/security-reports/$GITHUB_REPOSITORY/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/$GITHUB_SHA/sonarqube-issues.csv" \
+            --region "$AWS_REGION" \
+            --sse AES256
+      - name: Enforce SonarQube quality gate
+        if: always()
+        env:
+          SONAR_OUTCOME: ${{ steps.sonar-analysis.outcome }}
+          CSV_OUTCOME: ${{ steps.sonar-csv.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.sonar-upload.outcome }}
+        run: |
+          set -eu
+          test "$SONAR_OUTCOME" = success || { echo "SonarQube analysis or quality gate failed"; exit 1; }
+          test "$CSV_OUTCOME" = success || { echo "SonarQube CSV export failed"; exit 1; }
+          test "$UPLOAD_OUTCOME" = success || { echo "SonarQube report upload to S3 failed"; exit 1; }
 
   docker:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      S3_BUCKET: ${{ vars.S3_BUCKET }}
     steps:
       - uses: actions/checkout@v4
       - name: Build image for scanning
@@ -56,14 +114,41 @@ jobs:
             --tag "$DOCKERHUB_USERNAME/student-management:latest" \
             .
       - name: Scan image with Trivy
+        id: trivy-scan
+        continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/student-management:${{ github.sha }}
-          format: table
+          format: json
+          output: trivy-results.json
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: os,library
           severity: HIGH,CRITICAL
+      - name: Export Trivy vulnerabilities to CSV
+        run: |
+          python scripts/export_scan_reports.py trivy \
+            --input trivy-results.json \
+            --commit "$GITHUB_SHA" \
+            --image "$DOCKERHUB_USERNAME/student-management:$GITHUB_SHA" \
+            --output trivy-vulnerabilities.csv
+      - name: Configure AWS credentials for report upload
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Upload Trivy CSV to S3
+        run: |
+          aws s3 cp trivy-vulnerabilities.csv \
+            "s3://$S3_BUCKET/security-reports/$GITHUB_REPOSITORY/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/$GITHUB_SHA/trivy-vulnerabilities.csv" \
+            --region "$AWS_REGION" \
+            --sse AES256
+      - name: Enforce Trivy vulnerability gate
+        env:
+          TRIVY_OUTCOME: ${{ steps.trivy-scan.outcome }}
+        run: |
+          set -eu
+          test "$TRIVY_OUTCOME" = success || { echo "Trivy found blocking vulnerabilities or the scan failed"; exit 1; }
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:

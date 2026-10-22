@@ -19,3 +19,4 @@ spec:
     method: git:secret:git-creds
     gitConfig:
       branch: main
+      writeBackTarget: kustomization

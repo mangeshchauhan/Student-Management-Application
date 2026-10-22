@@ -9,8 +9,6 @@ spec:
     repoURL: https://github.com/mangeshchauhan/Student-Management-Application.git
     targetRevision: main
     path: manifests
-    directory:
-      exclude: secret.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: student-management
