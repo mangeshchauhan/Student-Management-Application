@@ -152,6 +152,24 @@ Remove-Variable root,db,rootPlain,dbPlain
 
 Use the same database password that the existing `sms_app` MySQL account has. If the Secret already exists, update it deliberately rather than running the create command again. Updating a Secret does not change passwords stored inside an initialized MySQL database.
 
+### Install Argo CD Image Updater
+
+Image Updater watches Docker Hub for ordered build tags containing the commit SHA and commits the selected tag to `manifests/kustomization.yaml`. It needs write access to the GitHub repository; create a fine-grained GitHub token with **Contents: Read and write** permission and permission to push to `main`.
+
+Install Image Updater and create its Git credential Secret. Enter the token when prompted; do not commit it or put it in a script:
+
+```powershell
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj-labs/argocd-image-updater/stable/config/install.yaml
+$gitUser = Read-Host "GitHub username"
+$token = Read-Host "GitHub token" -AsSecureString
+$tokenPlain = [System.Net.NetworkCredential]::new('', $token).Password
+kubectl create secret generic git-creds -n argocd --from-literal="username=$gitUser" --from-literal="password=$tokenPlain" --dry-run=client -o yaml | kubectl apply -f -
+Remove-Variable gitUser,token,tokenPlain
+kubectl apply -f argocd/image-updater.yaml
+```
+
+The repository must allow this token to push directly to `main`. If branch protection disallows direct pushes, configure a write branch and merge process before enabling Git write-back.
+
 ### Register and Sync the Application
 
 ```powershell
@@ -181,7 +199,7 @@ Change the initial admin password after signing in. The UI port-forward only las
 
 ### Image Updates
 
-GitHub Actions currently pushes the `latest` image tag. Argo CD tracks Kubernetes manifests and does not detect a new image pushed under an unchanged tag. To roll out each build reliably, use immutable image tags and update `manifests/deployment.yaml`, or install and configure Argo CD Image Updater. Avoid relying on `latest` alone to trigger pod replacements.
+On every successful push to `main`, GitHub Actions builds and scans the image, then pushes a full commit-SHA tag, a `build-<run-number>-<commit-sha>` tag, and `latest` to Docker Hub. Argo CD Image Updater watches only the ordered build tags and writes the highest run-number tag to `manifests/kustomization.yaml`. This avoids depending on Docker Hub's image-creation metadata to choose the newest tag. Argo CD detects the Git change and rolls out that exact image. The workflow ignores commits that only update this Kustomize file, preventing an image-update commit from starting another build. The `latest` tag is retained for compatibility but is not used to trigger deployments.
 
 ### Scheduled MySQL Backups to S3
 

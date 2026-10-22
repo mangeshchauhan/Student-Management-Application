@@ -2,6 +2,8 @@ name: CI/CD
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - manifests/kustomization.yaml
   workflow_dispatch:
 jobs:
   build:
@@ -47,8 +49,10 @@ jobs:
         run: |
           set -eu
           test -n "$DOCKERHUB_USERNAME"
+          RUN_TAG=$(printf 'build-%010d-%s' "$GITHUB_RUN_NUMBER" "$GITHUB_SHA")
           docker build --pull \
             --tag "$DOCKERHUB_USERNAME/student-management:$GITHUB_SHA" \
+            --tag "$DOCKERHUB_USERNAME/student-management:$RUN_TAG" \
             --tag "$DOCKERHUB_USERNAME/student-management:latest" \
             .
       - name: Scan image with Trivy
@@ -69,5 +73,6 @@ jobs:
         run: |
           set -eu
           docker push "$DOCKERHUB_USERNAME/student-management:$GITHUB_SHA"
+          RUN_TAG=$(printf 'build-%010d-%s' "$GITHUB_RUN_NUMBER" "$GITHUB_SHA")
+          docker push "$DOCKERHUB_USERNAME/student-management:$RUN_TAG"
           docker push "$DOCKERHUB_USERNAME/student-management:latest"
-
