@@ -206,7 +206,7 @@ arn:aws:s3:::YOUR_PRIVATE_BUCKET/security-reports/mangeshchauhan/Student-Managem
 
 Replace `YOUR_PRIVATE_BUCKET` with the bucket configured in `S3_BUCKET`. Keep S3 Block Public Access enabled. The workflow uploads reports with SSE-S3 (`AES256`); configure bucket lifecycle rules if reports should expire automatically.
 
-The workflow creates `sonarqube-issues.csv` from the project's current SonarQube issues returned by `/api/issues/search`, and converts Trivy's JSON vulnerability report into `trivy-vulnerabilities.csv`. Both are uploaded under a unique path containing the GitHub run ID, attempt, and commit SHA. Reports are uploaded before the quality-gate check is finalized, so a failing scan can still leave its report in S3. The SonarQube CSV describes current project issues (not only issues introduced by that commit); the commit SHA is included to associate it with the workflow run.
+The workflow explicitly sets the SonarScanner working directory to `.scannerwork` and checks its newly generated `report-task.txt` before querying SonarQube, preventing export of stale issues when a scan did not submit. It creates `sonarqube-issues.csv` from the project's current SonarQube issues returned by `/api/issues/search`, and converts Trivy's JSON vulnerability report into `trivy-vulnerabilities.csv`. Both are uploaded under a unique path containing the GitHub run ID, attempt, and commit SHA. Reports are uploaded before the quality-gate check is finalized, so a failing quality gate can still leave its report in S3. The SonarQube CSV describes current project issues (not only issues introduced by that commit); the commit SHA is included to associate it with the workflow run.
 
 ## 7. Run the Workflow
 
