@@ -1,6 +1,8 @@
 # SonarQube and Trivy Setup
 
-This guide configures the GitHub Actions workflow at `.github/workflows/ci-cd.yml` to analyze Java source with SonarQube and scan the built container image with Trivy before publishing it to Docker Hub.
+This guide describes the GitHub Actions workflow at `.github/workflows/ci-cd.yml`, which analyzes Java source with SonarQube and scans the built container image with Trivy before publishing it to Docker Hub.
+
+**Temporary status:** SonarQube/Trivy CSV generation and S3 report uploads are commented out in the workflow for now. The SonarQube quality gate and Trivy vulnerability gate remain enabled. The report-export and S3 setup below documents the planned configuration for when those workflow steps are re-enabled.
 
 ## Workflow Behavior
 
@@ -206,7 +208,7 @@ arn:aws:s3:::YOUR_PRIVATE_BUCKET/security-reports/mangeshchauhan/Student-Managem
 
 Replace `YOUR_PRIVATE_BUCKET` with the bucket configured in `S3_BUCKET`. Keep S3 Block Public Access enabled. The workflow uploads reports with SSE-S3 (`AES256`); configure bucket lifecycle rules if reports should expire automatically.
 
-The workflow explicitly sets the SonarScanner working directory to `.scannerwork` and checks its newly generated `report-task.txt` before querying SonarQube, preventing export of stale issues when a scan did not submit. It creates `sonarqube-issues.csv` from the project's current SonarQube issues returned by `/api/issues/search`, and converts Trivy's JSON vulnerability report into `trivy-vulnerabilities.csv`. Both are uploaded under a unique path containing the GitHub run ID, attempt, and commit SHA. Reports are uploaded before the quality-gate check is finalized, so a failing quality gate can still leave its report in S3. The SonarQube CSV describes current project issues (not only issues introduced by that commit); the commit SHA is included to associate it with the workflow run.
+When re-enabled, the report flow will set the SonarScanner working directory to `.scannerwork`, verify its `report-task.txt`, export the project's current SonarQube issues through `/api/issues/search`, and convert Trivy JSON output to CSV. Both reports will upload under a unique path containing the GitHub run ID, attempt, and commit SHA. The SonarQube CSV represents the project's current issues, not only issues introduced by that commit.
 
 ## 7. Run the Workflow
 
