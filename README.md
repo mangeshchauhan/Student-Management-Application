@@ -168,26 +168,26 @@ git push -u origin Feature/short-description
 
 ### 3. Merge the feature into `Dev`
 
-Open a pull request with **base: `Dev`** and **compare: `Feature/short-description`**. The Branch Validation workflow rejects other source branch patterns, runs Maven tests, builds the image, and blocks HIGH/CRITICAL Trivy findings with known fixes. Review the diff and merge only after required checks and approvals pass. Delete the feature branch after merging.
+Open a pull request with **base: `Dev`** and **compare: `Feature/short-description`**. The Branch Validation workflow allows only `Feature/*` (or `feature/*`) source branches into `Dev`. Review and merge the pull request, then delete the feature branch.
 
 Test the combined changes on `Dev`. Fix integration issues with new feature branches based on `Dev`, and merge those back through pull requests.
 
 ### 4. Promote `Dev` to `main`
 
-When `Dev` has passed integration and acceptance testing, open a pull request with **base: `main`** and **compare: `Dev`**. The Branch Validation workflow rejects other source branches and runs the same build, tests, and vulnerability scan. Review the complete release diff and merge only after approval and required checks pass. This pull request is the release promotion.
+When `Dev` has passed integration and acceptance testing, open a pull request with **base: `main`** and **compare: `Dev`**. The Branch Validation workflow allows only `Dev` as the source branch for PRs into `main`. Review the complete release diff before merging. This pull request is the release promotion.
 
 ### 5. Protect `main` in GitHub
 
 In the repository, open **Settings → Rules → Rulesets** (or **Settings → Branches → Branch protection rules**) and protect both `Dev` and `main`:
 
 - Require a pull request before merging and disallow routine direct pushes.
-- Require the `Validate source branch` and `Build, test, and scan` checks from [Branch Validation](.github/workflows/branch-validation.yml).
+- Require the `Validate source branch` check from [Branch Validation](.github/workflows/branch-validation.yml).
 - Require at least one approval for `main` if another reviewer is available.
 - Require approval of the latest reviewable push and resolve conversations before merging.
 - Block force pushes and branch deletion.
 - Configure the Argo CD Image Updater bot as the only narrowly scoped bypass actor needed to write image-tag updates directly to `Dev` and `main`; do not grant routine human bypasses.
 
-Select those check names as required after they have appeared in GitHub Actions. SonarQube analysis remains in [CI/CD](.github/workflows/ci-cd.yml) on pushes to the protected branches; this PR workflow does not run SonarQube analysis.
+Select the check as required after it has appeared in GitHub Actions. The workflow only enforces PR branch routing; build, test, and security checks are outside its scope.
 
 ## EKS Deployment Runbook
 

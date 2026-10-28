@@ -76,7 +76,7 @@ The workflow continues to use the existing `SONAR_HOST_URL` and `SONAR_TOKEN`. C
 
 ## 5. Validate the branch and publish the initial Dev image
 
-Create feature branches from `Dev`, using names such as `Feature/CR2222`. Open pull requests from `Feature/*` into `Dev`; when promoting a tested release, open a pull request from `Dev` into `main`. The Branch Validation workflow rejects other source/target combinations and runs Maven tests, builds the image, and blocks HIGH/CRITICAL Trivy findings with known fixes. Require its checks in GitHub branch rules before merging.
+Create feature branches from `Dev`, using names such as `Feature/CR2222`. Open pull requests from `Feature/*` into `Dev`; when promoting a tested release, open a pull request from `Dev` into `main`. The Branch Validation workflow enforces these source/target combinations only. Require its `Validate source branch` check in GitHub branch rules before merging.
 
 After a pull request is merged, CI/CD runs on pushes to `main` and `Dev`. It runs Maven tests and SonarQube analysis for the selected branch, then builds and scans the image. A successful `Dev` run pushes:
 
