@@ -121,9 +121,73 @@ The Jenkins-to-Application Server deployment uses SSH/SCP, while GitHub source c
 
 # 🔄 CI/CD Pipeline
 
-GitHub Actions builds the Spring Boot application and pushes the container image to Docker Hub. Argo CD synchronizes the Kubernetes resources from the `manifests/` directory; it does not build or publish the image.
+GitHub Actions validates pull requests and builds/scans images on pushes to `Dev` and `main`. Argo CD deploys production from `manifests/overlays/prod` on `main` and Dev from `manifests/overlays/dev` on `Dev`; it does not build or publish images.
 
-The GitHub Actions pipeline also runs SonarQube code analysis and a Trivy container-image scan before pushing, then exports scan reports to S3. See the [SonarQube and Trivy setup guide](docs/security-scanning/README.md) for server setup, GitHub variables/secrets, and local scan commands. For ordered deployment steps, use the separate [EC2 guide](docs/deployment/ec2/README.md) or [EKS guide](docs/deployment/eks/README.md).
+The GitHub Actions pipeline runs SonarQube code analysis and a Trivy container-image scan before pushing images from `main` and `Dev`. CSV report generation and S3 report uploads are currently disabled. See the [SonarQube and Trivy setup guide](docs/security-scanning/README.md) for server setup and GitHub variables/secrets. For deployment steps, use the [EC2 guide](docs/deployment/ec2/README.md), [EKS production guide](docs/deployment/eks/README.md), or [EKS Dev guide](docs/deployment/eks/dev/README.md).
+
+## Branch Workflow: Feature → Dev → Main
+
+Use `main` as the protected production branch. Develop changes on short-lived feature branches, merge completed features into `Dev` for integration testing, then promote tested `Dev` changes to `main` through a pull request.
+
+```text
+main (protected; production)
+  └── Dev (integration and acceptance testing)
+        └── Feature/<ticket-or-short-name>
+```
+
+### 1. Create or update `Dev`
+
+Create `Dev` from `main` once, then push it to GitHub. Keep it synchronized with `main` through pull requests rather than direct pushes:
+
+```powershell
+git switch main
+git pull origin main
+git switch -c Dev
+git push -u origin Dev
+```
+
+If `Dev` already exists, use `git switch Dev` and `git pull origin Dev` instead of creating it again.
+
+### 2. Create a feature branch from `Dev`
+
+Use a descriptive branch name, such as `Feature/CR2222` or `Feature/student-search`:
+
+```powershell
+git switch Dev
+git pull origin Dev
+git switch -c Feature/short-description
+```
+
+Commit and push feature work only to its feature branch:
+
+```powershell
+git add .
+git commit -m "Describe the feature"
+git push -u origin Feature/short-description
+```
+
+### 3. Merge the feature into `Dev`
+
+Open a pull request with **base: `Dev`** and **compare: `Feature/short-description`**. The Branch Validation workflow rejects other source branch patterns, runs Maven tests, builds the image, and blocks HIGH/CRITICAL Trivy findings with known fixes. Review the diff and merge only after required checks and approvals pass. Delete the feature branch after merging.
+
+Test the combined changes on `Dev`. Fix integration issues with new feature branches based on `Dev`, and merge those back through pull requests.
+
+### 4. Promote `Dev` to `main`
+
+When `Dev` has passed integration and acceptance testing, open a pull request with **base: `main`** and **compare: `Dev`**. The Branch Validation workflow rejects other source branches and runs the same build, tests, and vulnerability scan. Review the complete release diff and merge only after approval and required checks pass. This pull request is the release promotion.
+
+### 5. Protect `main` in GitHub
+
+In the repository, open **Settings → Rules → Rulesets** (or **Settings → Branches → Branch protection rules**) and protect both `Dev` and `main`:
+
+- Require a pull request before merging and disallow routine direct pushes.
+- Require the `Validate source branch` and `Build, test, and scan` checks from [Branch Validation](.github/workflows/branch-validation.yml).
+- Require at least one approval for `main` if another reviewer is available.
+- Require approval of the latest reviewable push and resolve conversations before merging.
+- Block force pushes and branch deletion.
+- Configure the Argo CD Image Updater bot as the only narrowly scoped bypass actor needed to write image-tag updates directly to `Dev` and `main`; do not grant routine human bypasses.
+
+Select those check names as required after they have appeared in GitHub Actions. SonarQube analysis remains in [CI/CD](.github/workflows/ci-cd.yml) on pushes to the protected branches; this PR workflow does not run SonarQube analysis.
 
 ## EKS Deployment Runbook
 
@@ -159,9 +223,9 @@ Do not proceed if the EBS CSI controller or AWS Load Balancer Controller is not 
 
 ### 3. Prepare and verify MySQL persistent storage
 
-This repository currently uses a **static EBS PersistentVolume**. Before syncing the application, open [mysql-pv.yaml](manifests/mysql-pv.yaml) and verify `volumeHandle` is the ID of the EBS volume you intend to use and the node-affinity availability zone matches that volume's zone. The volume must be in the same AWS region as the cluster and must not be mounted by another database. Do not point a new database at a volume containing data you do not intend to retain.
+This repository currently uses a **static EBS PersistentVolume**. Before syncing production, open [mysql-pv.yaml](manifests/overlays/prod/mysql-pv.yaml) and verify `volumeHandle` is the ID of the EBS volume you intend to use and the node-affinity availability zone matches that volume's zone. The volume must be in the same AWS region as the cluster and must not be mounted by another database. Do not point a new database at a volume containing data you do not intend to retain.
 
-The PersistentVolume and claim currently use the `gp2` storage class, while [storageclass.yaml](manifests/storageclass.yaml) defines a separate `ebs-gp3-retain` class. The static PV and PVC must use the same storage class name; make sure the EKS cluster has a matching class or update both manifests consistently before deployment. The `ebs-gp3-retain` resource alone does not change the claim's storage class.
+The PersistentVolume and claim currently use the `gp2` storage class, while [storageclass.yaml](manifests/overlays/prod/storageclass.yaml) defines a separate `ebs-gp3-retain` class. The static PV and PVC must use the same storage class name; make sure the EKS cluster has a matching class or update both manifests consistently before deployment. The `ebs-gp3-retain` resource alone does not change the claim's storage class.
 
 After applying the application in step 7, verify the claim binds before expecting MySQL to start:
 
@@ -208,7 +272,7 @@ kubectl get applications.argoproj.io -n argocd
 kubectl get pods,pvc -n student-management
 ```
 
-The Application tracks `main` and automatically syncs the Kustomize resources in `manifests/`. Keep `spec.source.directory` unset; Argo CD must detect `manifests/kustomization.yaml` and render it with Kustomize. Automatic self-healing is enabled and pruning is disabled to reduce the risk of removing stateful resources.
+The production Application tracks `main` and automatically syncs `manifests/overlays/prod`; Dev uses `Dev` and `manifests/overlays/dev`. Keep `spec.source.directory` unset; Argo CD must render the Kustomize entry point in each path. Automatic self-healing is enabled and pruning is disabled to reduce the risk of removing stateful resources.
 
 Wait for the MySQL PVC and pod to become healthy before diagnosing application startup. Check `kubectl describe pod` and pod Events if a container remains in `ContainerCreating` or enters a restart back-off.
 
@@ -268,7 +332,7 @@ Use the same database password that the existing `sms_app` MySQL account has. If
 
 ### Install Argo CD Image Updater
 
-Image Updater watches Docker Hub for ordered build tags containing the commit SHA and commits the selected tag to `manifests/kustomization.yaml`. It needs write access to the GitHub repository; create a fine-grained GitHub token with **Contents: Read and write** permission and permission to push to `main`.
+The production Image Updater watches Docker Hub for ordered build tags containing the commit SHA and commits the selected tag to `manifests/overlays/prod/kustomization.yaml`. The Dev updater writes to `manifests/overlays/dev/kustomization.yaml` on `Dev`. Each updater needs repository Contents write access to its target branch. When branch rules require pull requests, grant the updater's bot identity the narrowly scoped bypass needed for these Git write-backs.
 
 Install Image Updater and create its Git credential Secret. Enter the token when prompted; do not commit it or put it in a script:
 
@@ -294,7 +358,7 @@ kubectl get pods -n student-management
 
 The Application automatically syncs manifest changes and self-heals drift. Automatic pruning is disabled to avoid deleting stateful MySQL resources when manifests are removed. The MySQL Secret is not managed by Argo CD.
 
-The Application uses the `manifests/kustomization.yaml` file to render resources with Kustomize. Do not configure `spec.source.directory` for this Application; directory mode makes Argo CD interpret `kustomization.yaml` as a Kubernetes resource instead of a build file.
+The production Application renders `manifests/overlays/prod/kustomization.yaml`; the Dev Application renders `manifests/overlays/dev/kustomization.yaml`. Do not configure `spec.source.directory` for either Application; Argo CD must render each path with Kustomize.
 
 ### Open the Argo CD UI
 
@@ -315,7 +379,7 @@ Change the initial admin password after signing in. The UI port-forward only las
 
 ### Image Updates
 
-On every successful push to `main`, GitHub Actions builds and scans the image, then pushes a full commit-SHA tag, a `build-<run-number>-<commit-sha>` tag, and `latest` to Docker Hub. Argo CD Image Updater watches only the ordered build tags and writes the highest run-number tag to `manifests/kustomization.yaml`. This avoids depending on Docker Hub's image-creation metadata to choose the newest tag. Argo CD detects the Git change and rolls out that exact image. The workflow ignores commits that only update this Kustomize file, preventing an image-update commit from starting another build. The `latest` tag is retained for compatibility but is not used to trigger deployments.
+On successful pushes to `main` and `Dev`, GitHub Actions builds and scans the image, then publishes production `build-*`/`latest` tags or Dev `dev-build-*`/`dev-latest` tags respectively. Each Argo CD Image Updater watches only its branch's ordered build tags and updates that environment's Kustomize file. Argo CD detects the Git change and rolls out that exact image. CI ignores commits that only update either environment's Kustomize file, preventing image-update commits from starting another build. Mutable tracking tags are retained but are not used to trigger deployments.
 
 ### Scheduled MySQL Backups to S3
 

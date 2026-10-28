@@ -162,8 +162,8 @@ Open the site, sign in with the initial `admin` credentials, and immediately cha
 
 ## 5. Create the SonarQube Project and Token
 
-1. In SonarQube, create a project for this GitHub repository.
-2. Copy its exact project key; the workflow sends this as `SONAR_PROJECT_KEY`.
+1. In SonarQube, create a production project for this GitHub repository and a separate project for the `Dev` branch.
+2. Copy the production project key as `SONAR_PROJECT_KEY` and the Dev project key as `SONAR_PROJECT_KEY_DEV`.
 3. Create a project analysis token and copy it once. Treat it as a password.
 4. Confirm the project quality gate and quality profile are enabled. The workflow waits for the quality gate and fails if it does not pass.
 
@@ -176,7 +176,8 @@ Add these repository variables:
 | Variable | Value |
 | --- | --- |
 | `SONAR_HOST_URL` | SonarQube server URL, including scheme, such as `https://sonar.example.com` |
-| `SONAR_PROJECT_KEY` | The exact project key created in SonarQube |
+| `SONAR_PROJECT_KEY` | The exact production/main project key created in SonarQube |
+| `SONAR_PROJECT_KEY_DEV` | A separate SonarQube project key for the `Dev` branch |
 | `AWS_ROLE_ARN` | ARN of the AWS IAM role GitHub Actions assumes through OIDC |
 | `AWS_REGION` | AWS region containing the report bucket |
 | `S3_BUCKET` | Name of the private S3 bucket for scan reports |
@@ -222,15 +223,17 @@ git push origin main
 
 Open the repository’s **Actions** tab and check the `build` job first. If it fails, inspect the Maven/SonarQube output and confirm the host URL, token, project key, and runner network access. The `docker` job runs only after the build and quality gate pass.
 
-The image tags are:
+The image tags depend on the source branch:
 
 ```text
-<DOCKERHUB_USERNAME>/student-management:<commit-sha>
-<DOCKERHUB_USERNAME>/student-management:build-<run-number>-<commit-sha>
-<DOCKERHUB_USERNAME>/student-management:latest
+main: <DOCKERHUB_USERNAME>/student-management:<commit-sha>
+main: <DOCKERHUB_USERNAME>/student-management:build-<run-number>-<commit-sha>
+main: <DOCKERHUB_USERNAME>/student-management:latest
+Dev:  <DOCKERHUB_USERNAME>/student-management:dev-build-<run-number>-<commit-sha>
+Dev:  <DOCKERHUB_USERNAME>/student-management:dev-latest
 ```
 
-Deployments should prefer the commit-SHA tag for reproducibility. `latest` is mutable and by itself does not cause Kubernetes or Argo CD to restart pods.
+The production and Dev Image Updaters filter different tag prefixes. Deployments use the ordered immutable build tags; mutable `latest` and `dev-latest` tags alone do not trigger Argo CD updates. CSV report exports and S3 uploads are currently disabled in the workflow, as noted at the top of this guide.
 
 ## 8. Trivy Runs in GitHub Actions
 
