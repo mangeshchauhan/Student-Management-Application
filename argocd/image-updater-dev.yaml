@@ -1,0 +1,22 @@
+apiVersion: argocd-image-updater.argoproj.io/v1alpha1
+kind: ImageUpdater
+metadata:
+  name: student-management-dev
+  namespace: argocd
+spec:
+  applicationRefs:
+    - namePattern: student-management-dev
+      images:
+        - alias: student-management
+          imageName: mangeshc225/student-management:dev-latest
+          commonUpdateSettings:
+            updateStrategy: alphabetical
+            allowTags: '^dev-build-[0-9]{10}-[0-9a-f]{40}$'
+          manifestTargets:
+            kustomize:
+              name: mangeshc225/student-management
+  writeBackConfig:
+    method: git:secret:git-creds
+    gitConfig:
+      branch: Dev
+      writeBackTarget: kustomization

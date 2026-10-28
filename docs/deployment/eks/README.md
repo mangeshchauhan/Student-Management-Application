@@ -2,14 +2,14 @@
 
 This guide covers the containerized Kubernetes deployment to Amazon EKS. It assumes the EKS cluster and worker nodes already exist. For the legacy Jenkins/JAR deployment to EC2, use the [EC2 deployment guide](../ec2/README.md).
 
-The GitHub Actions workflow builds and scans the container image, pushes it to Docker Hub, and exports SonarQube and Trivy CSV reports to S3. Argo CD synchronizes Kubernetes resources from Git; Argo CD Image Updater detects new image tags and writes the selected tag back to the Git-tracked Kustomize file.
+The pull-request workflow enforces `Feature/* → Dev → main` and validates Maven tests and Trivy scans before merge. The CI/CD workflow builds and scans images from `main` and `Dev`, then pushes branch-specific image tags to Docker Hub. SonarQube CSV report generation and Trivy CSV/S3 exports are currently disabled. Argo CD synchronizes production from `manifests/overlays/prod` on `main` and Dev from `manifests/overlays/dev` on `Dev`. For isolated Dev resources, use the [EKS Dev guide](./dev/README.md).
 
 ## Prerequisites
 
 - AWS CLI, `kubectl`, Git, and PowerShell on the operator workstation.
 - IAM access to the EKS cluster.
 - A publicly readable GitHub repository (the Argo CD Application uses unauthenticated HTTPS Git), or Argo CD repository credentials configured for a private repository.
-- Docker Hub image repository matching the image name in `argocd/image-updater.yaml` and `manifests/kustomization.yaml`.
+- Docker Hub image repository matching the image name in `argocd/image-updater.yaml` and `manifests/overlays/prod/kustomization.yaml`.
 - A static EBS volume dedicated to MySQL, as described in Step 3.
 - A private S3 bucket for database backups and security reports.
 - GitHub Actions variables/secrets and SonarQube configuration described in [Security Scanning](../../security-scanning/README.md).
@@ -46,14 +46,14 @@ Do not continue until both add-ons are configured and healthy.
 
 ## 3. Configure MySQL EBS storage
 
-This repository currently uses a **static EBS PersistentVolume**. Edit `manifests/mysql-pv.yaml` before deployment:
+This repository currently uses a **static EBS PersistentVolume**. Edit `manifests/overlays/prod/mysql-pv.yaml` before deployment:
 
 - Set `volumeHandle` to the ID of the EBS volume dedicated to this database.
 - Set the node-affinity availability zone to the volume's actual availability zone.
 - Ensure the volume and EKS cluster are in the same AWS region.
 - Never reuse a volume containing data you do not intend to retain.
 
-The PV and PVC currently specify `gp2`; both must use the same storage class name, and that class must exist in the cluster. `manifests/storageclass.yaml` also defines `ebs-gp3-retain`, but defining that class does not automatically change the PV/PVC. If choosing another storage class, update the PV and claim consistently before applying.
+The PV and PVC currently specify `gp2`; both must use the same storage class name, and that class must exist in the cluster. `manifests/overlays/prod/storageclass.yaml` also defines `ebs-gp3-retain`, but defining that class does not automatically change the PV/PVC. If choosing another storage class, update the PV and claim consistently before applying.
 
 ## 4. Create the S3 bucket and IAM roles
 
@@ -142,7 +142,7 @@ kubectl get applications.argoproj.io -n argocd
 kubectl get pods,pvc -n student-management
 ```
 
-The Application tracks the `main` branch and `manifests/` path. Do not add `spec.source.directory`; Argo CD must detect `manifests/kustomization.yaml` and render it with Kustomize. The Secret is not managed by Argo CD. Automated sync and self-healing are enabled; pruning is disabled to reduce the risk of removing stateful resources.
+The production Application tracks the `main` branch and `manifests/overlays/prod` path. Do not add `spec.source.directory`; Argo CD must detect the Kustomize file in that path. The Secret is not managed by Argo CD. Automated sync and self-healing are enabled; pruning is disabled to reduce the risk of removing stateful resources.
 
 Wait for the MySQL PVC to bind and the MySQL pod to become Ready. Useful checks:
 
@@ -155,16 +155,16 @@ kubectl get events -n student-management --sort-by=.lastTimestamp
 
 If MySQL or the application pod is in `ContainerCreating` or restart back-off, inspect `kubectl describe pod` and logs before proceeding.
 
-## 8. Configure CI/CD and security report export
+## 8. Configure CI/CD and branch-specific SonarQube projects
 
 Configure GitHub Actions variables and secrets as listed in the [security-scanning guide](../../security-scanning/README.md), including:
 
-- Variables: `SONAR_HOST_URL`, `SONAR_PROJECT_KEY`, `AWS_ROLE_ARN`, `AWS_REGION`, `S3_BUCKET`.
-- Secrets: `SONAR_TOKEN`, `SONAR_REPORT_TOKEN`, `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`.
+- Variables: `SONAR_HOST_URL`, `SONAR_PROJECT_KEY`, `SONAR_PROJECT_KEY_DEV`.
+- Secrets: `SONAR_TOKEN`, `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`.
 
-Use HTTPS for SonarQube when GitHub-hosted runners connect. The workflow requires GitHub OIDC trust restricted to the intended repository/branch and S3 write permission limited to the security report prefix.
+Use HTTPS for SonarQube when GitHub-hosted runners connect. `SONAR_PROJECT_KEY_DEV` must identify a separate SonarQube project for the Dev branch. CSV report generation and report S3 uploads are currently disabled.
 
-On successful scans, CI pushes the commit SHA, ordered build tag, and `latest` image tags. The Trivy and SonarQube CSV reports are uploaded to the private S3 bucket. A failed quality gate or blocking Trivy result prevents the image push.
+On successful scans, CI pushes branch-specific image tags: production `build-*`/`latest` tags from `main`, and `dev-build-*`/`dev-latest` tags from `Dev`. A failed quality gate or blocking Trivy result prevents the image push.
 
 ## 9. Install Argo CD Image Updater
 
@@ -175,7 +175,7 @@ kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj-labs/argoc
 kubectl rollout status deployment/argocd-image-updater-controller -n argocd --timeout=300s
 ```
 
-Create a GitHub fine-grained token with repository **Contents: Read and write** access and permission to push to `main`. Store it in a Kubernetes Secret (do not put it in a file committed to Git):
+Create a GitHub bot identity and fine-grained token with repository **Contents: Read and write** access to the required branches. Store the token in a Kubernetes Secret (do not put it in a file committed to Git):
 
 ```powershell
 $gitUser = Read-Host "GitHub username"
@@ -185,14 +185,14 @@ kubectl create secret generic git-creds -n argocd --from-literal="username=$gitU
 Remove-Variable gitUser,token,tokenPlain
 ```
 
-The repository must permit the token to push to `main`. Apply the ImageUpdater resource:
+If branch rules require pull requests, add the bot identity as the narrowly scoped bypass actor for the Image Updater write-back; do not allow routine human direct pushes. Apply the ImageUpdater resource:
 
 ```powershell
 kubectl apply -f argocd/image-updater.yaml
 kubectl get imageupdater -n argocd
 ```
 
-The configuration watches ordered `build-<run-number>-<commit-sha>` Docker Hub tags and uses the `kustomization` Git write-back target to update `manifests/kustomization.yaml`. The CI workflow ignores image-updater-only changes to that file to avoid triggering another image build.
+The configuration watches ordered `build-<run-number>-<commit-sha>` Docker Hub tags and uses the `kustomization` Git write-back target to update `manifests/overlays/prod/kustomization.yaml`. The CI workflow ignores image-updater-only changes to that file to avoid triggering another image build.
 
 ## 10. Verify the application and image update
 
@@ -208,7 +208,7 @@ The Ingress currently configures HTTP on port 80. For production HTTPS, configur
 
 To test image updates, run the GitHub Actions workflow on `main`. After the build, security scans, and Docker Hub push pass:
 
-1. Image Updater should commit the new image tag to `manifests/kustomization.yaml`.
+1. Image Updater should commit the new image tag to `manifests/overlays/prod/kustomization.yaml`.
 2. Argo CD should detect and sync that Git commit.
 3. Kubernetes should roll out the new image.
 
